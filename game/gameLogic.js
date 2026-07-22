@@ -63,10 +63,22 @@ export function maybeStartNight(io, room) {
   advanceNightHour(io, room);
 }
 
+function recordJewelObservation(player, room) {
+  player.jewelObservationAtHour = room.jewelStolen ? 'gone' : 'present';
+}
+
+function finalizeHourObservations(room, hour) {
+  for (const player of room.playersAtHour(hour)) {
+    if (player.jewelObservationAtHour != null) continue;
+    player.jewelObservationAtHour = room.jewelStolen ? 'gone' : 'present';
+  }
+}
+
 function advanceNightHour(io, room) {
   room.currentHour += 1;
 
   if (room.currentHour > room.settings.maxHours) {
+    finalizeHourObservations(room, room.currentHour - 1);
     endNightPhase(io, room);
     return;
   }
@@ -78,6 +90,8 @@ function advanceNightHour(io, room) {
 
   for (const player of awakePlayers) {
     const isThief = player.id === room.thiefId;
+    const jewelPresent = !room.jewelStolen;
+    recordJewelObservation(player, room);
     const coAwakePlayers = awakePlayers
       .filter((candidate) => candidate.id !== player.id)
       .map((candidate) => ({ id: candidate.id, name: candidate.name }));
@@ -85,7 +99,7 @@ function advanceNightHour(io, room) {
     io.to(player.socketId).emit('night_wake', {
       hour: room.currentHour,
       isThief,
-      jewelPresent: !room.jewelStolen,
+      jewelPresent,
       coAwakePlayers,
       revealedThief: revealedThief && !isThief ? { id: revealedThief.id, name: revealedThief.name } : null,
       candidates: isThief
@@ -98,6 +112,7 @@ function advanceNightHour(io, room) {
 
   room.resetTimers();
   room.nightTimer = setTimeout(() => {
+    finalizeHourObservations(room, room.currentHour);
     advanceNightHour(io, room);
   }, room.settings.nightHourDurationMs);
 }
@@ -117,6 +132,7 @@ export function handleThiefAction(io, room, thiefPlayerId, assistantId) {
   room.stealJewel(room.currentHour);
 
   const thiefPlayer = room.players.get(thiefPlayerId);
+  thiefPlayer.jewelObservationAtHour = 'gone';
   io.to(thiefPlayer.socketId).emit('theft_confirmed', {
     assistantId: room.assistantId,
   });
@@ -218,6 +234,7 @@ export function resetRoomToLobby(io, room) {
     p.hour = null;
     p.role = p.isSpectator ? 'spectator' : 'innocent';
     p.hasRolled = false;
+    p.jewelObservationAtHour = null;
   }
   broadcastRoom(io, room);
 }

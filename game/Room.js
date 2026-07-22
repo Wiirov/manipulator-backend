@@ -58,6 +58,7 @@ export class Room {
       hasRolled: false,
       hasActedThisHour: false,
       isSpectator: Boolean(options.isSpectator),
+      jewelObservationAtHour: null,
     };
     this.players.set(playerId, player);
     return player;
@@ -130,6 +131,7 @@ export class Room {
       player.hour = null;
       player.hasRolled = false;
       player.hasActedThisHour = false;
+      player.jewelObservationAtHour = null;
     }
 
     for (const player of this.playerList.filter((p) => p.isSpectator)) {
@@ -309,6 +311,11 @@ export class Room {
           .map((p) => ({ id: p.id, name: p.name }))
       : [];
 
+    const hourHasBeenReached = this.phase !== PHASES.NIGHT || this.currentHour >= self?.hour;
+    const jewelAtMyHour = self && !isSpectator && self.hour && hourHasBeenReached && this.phase !== PHASES.LOBBY && this.phase !== PHASES.ROLLING
+      ? self.jewelObservationAtHour
+      : null;
+
     return {
       code: this.code,
       hostId: this.hostId,
@@ -319,6 +326,7 @@ export class Room {
       roleSummary: this.getRoleSummary(),
       partner,
       sameHourPlayers,
+      jewelAtMyHour,
       jewelStolen: this.phase === PHASES.DAY || this.phase === PHASES.VOTING || this.phase === PHASES.RESULTS
         ? this.jewelStolen
         : false,

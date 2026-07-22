@@ -72,3 +72,26 @@ test('publicState exposes same-hour player names in HUD data', () => {
   const rollingView = room.publicState('p1');
   assert.deepEqual(rollingView.sameHourPlayers, [{ id: 'p2', name: 'Bob' }]);
 });
+
+test('publicState exposes jewel memory at the player hour for the HUD', () => {
+  const room = new Room('TEST3', 'p1');
+  room.addPlayer('p1', 'Alice');
+  room.addPlayer('p2', 'Bob');
+  room.addPlayer('p3', 'Carol');
+  room.addPlayer('p4', 'Dave');
+  room.addPlayer('p5', 'Eve');
+  room.phase = 'night';
+  room.currentHour = 2;
+  room.players.get('p1').hour = 2;
+  room.players.get('p1').hasRolled = true;
+  room.players.get('p1').jewelObservationAtHour = 'present';
+  room.players.get('p2').hour = 4;
+  room.players.get('p2').hasRolled = true;
+
+  assert.equal(room.publicState('p1').jewelAtMyHour, 'present');
+  assert.equal(room.publicState('p2').jewelAtMyHour, null);
+
+  room.players.get('p2').jewelObservationAtHour = 'gone';
+  room.currentHour = 4;
+  assert.equal(room.publicState('p2').jewelAtMyHour, 'gone');
+});
