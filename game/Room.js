@@ -148,7 +148,9 @@ export class Room {
     activePlayers.forEach((player, index) => {
       const role = shuffled[index] || 'innocent';
       player.role = role;
-      if (role === 'thief') this.thiefId = player.id;
+      if (role === 'thief') {
+        if (!this.thiefId) this.thiefId = player.id;
+      }
     });
 
     this.actionLog = [];

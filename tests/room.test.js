@@ -95,3 +95,26 @@ test('publicState exposes jewel memory at the player hour for the HUD', () => {
   room.currentHour = 4;
   assert.equal(room.publicState('p2').jewelAtMyHour, 'gone');
 });
+
+test('players co-awake with a thief defer jewel memory until theft or hour end', () => {
+  const room = new Room('TEST4', 'p1');
+  room.addPlayer('p1', 'Alice');
+  room.addPlayer('p2', 'Bob');
+  room.addPlayer('p3', 'Carol');
+  room.addPlayer('p4', 'Dave');
+  room.addPlayer('p5', 'Eve');
+  room.phase = 'night';
+  room.currentHour = 1;
+  room.thiefId = 'p2';
+  room.players.get('p1').role = 'innocent';
+  room.players.get('p2').role = 'thief';
+  room.players.get('p1').hour = 1;
+  room.players.get('p2').hour = 1;
+  room.players.get('p1').hasRolled = true;
+  room.players.get('p2').hasRolled = true;
+
+  assert.equal(room.publicState('p1').jewelAtMyHour, null);
+
+  room.players.get('p1').jewelObservationAtHour = 'gone';
+  assert.equal(room.publicState('p1').jewelAtMyHour, 'gone');
+});

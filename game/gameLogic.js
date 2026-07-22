@@ -89,22 +89,34 @@ function advanceNightHour(io, room) {
   broadcastRoom(io, room);
 
   for (const player of awakePlayers) {
-    const isThief = player.id === room.thiefId;
+    if (!player.socketId) continue;
+    const isThief = player.role === 'thief';
+    const coAwakeWithThief = !isThief && awakePlayers.some((candidate) => candidate.role === 'thief');
     const jewelPresent = !room.jewelStolen;
-    recordJewelObservation(player, room);
-    const coAwakePlayers = awakePlayers
-      .filter((candidate) => candidate.id !== player.id)
-      .map((candidate) => ({ id: candidate.id, name: candidate.name }));
-    const revealedThief = awakePlayers.find((candidate) => candidate.role === 'thief');
+
+    // Innocents who wake with a thief learn the outcome when theft happens, not at wake start.
+    if (!coAwakeWithThief) {
+      recordJewelObservation(player, room);
+    } else if (room.jewelStolen) {
+      player.jewelObservationAtHour = 'gone';
+    }
+
+    const coAwakePlayers = coAwakeWithThief
+      ? []
+      : awakePlayers
+          .filter((candidate) => candidate.id !== player.id)
+          .map((candidate) => ({ id: candidate.id, name: candidate.name }));
+
     io.to(player.socketId).emit('night_wake', {
       hour: room.currentHour,
       isThief,
       jewelPresent,
+      coAwakeWithThief,
       coAwakePlayers,
-      revealedThief: revealedThief && !isThief ? { id: revealedThief.id, name: revealedThief.name } : null,
+      revealedThief: null,
       candidates: isThief
         ? room.activePlayers
-            .filter((p) => p.id !== room.thiefId && p.role === 'innocent')
+            .filter((p) => p.role === 'innocent')
             .map((p) => ({ id: p.id, name: p.name }))
         : undefined,
     });
@@ -120,7 +132,8 @@ function advanceNightHour(io, room) {
 // Thief calls this (via socket handler) during their awake window.
 export function handleThiefAction(io, room, thiefPlayerId, assistantId) {
   if (room.phase !== PHASES.NIGHT) return;
-  if (thiefPlayerId !== room.thiefId) return;
+  const thiefPlayer = room.players.get(thiefPlayerId);
+  if (!thiefPlayer || thiefPlayer.role !== 'thief') return;
   const currentHourPlayers = room.playersAtHour(room.currentHour).map((p) => p.id);
   if (!currentHourPlayers.includes(thiefPlayerId)) return;
 
@@ -131,11 +144,18 @@ export function handleThiefAction(io, room, thiefPlayerId, assistantId) {
 
   room.stealJewel(room.currentHour);
 
-  const thiefPlayer = room.players.get(thiefPlayerId);
   thiefPlayer.jewelObservationAtHour = 'gone';
   io.to(thiefPlayer.socketId).emit('theft_confirmed', {
     assistantId: room.assistantId,
   });
+
+  for (const player of room.playersAtHour(room.currentHour)) {
+    if (player.role === 'thief') continue;
+    player.jewelObservationAtHour = 'gone';
+    if (player.socketId) {
+      io.to(player.socketId).emit('jewel_stolen_notification', { hour: room.currentHour });
+    }
+  }
 
   const assistantPlayer = room.players.get(room.assistantId);
   if (assistantPlayer?.socketId) {
