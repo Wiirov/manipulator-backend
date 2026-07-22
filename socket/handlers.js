@@ -91,6 +91,37 @@ export function registerSocketHandlers(io, socket) {
     broadcastRoom(io, room);
   });
 
+  socket.on('kick_player', ({ targetPlayerId }, cb) => {
+    const room = getRoomOfSocket(socket);
+    if (!room) return cb?.({ error: 'Room not found' });
+    if (room.phase !== PHASES.LOBBY) return cb?.({ error: 'Can only kick players in the lobby' });
+    if (room.hostId !== socket.data.playerId) return cb?.({ error: 'Only the host can kick players' });
+    if (targetPlayerId === socket.data.playerId) return cb?.({ error: 'You cannot kick yourself' });
+
+    const target = room.players.get(targetPlayerId);
+    if (!target) return cb?.({ error: 'Player not found' });
+
+    const targetSocketId = target.socketId;
+    room.removePlayer(targetPlayerId);
+
+    if (targetSocketId) {
+      io.to(targetSocketId).emit('kicked', { message: 'You were removed from the room by the host.' });
+      const targetSocket = io.sockets.sockets.get(targetSocketId);
+      if (targetSocket) {
+        targetSocket.leave(room.code);
+        delete targetSocket.data.roomCode;
+        delete targetSocket.data.playerId;
+      }
+    }
+
+    if (room.playerCount === 0) {
+      rooms.delete(room.code);
+    } else {
+      broadcastRoom(io, room);
+    }
+    cb?.({ ok: true });
+  });
+
   socket.on('toggle_ready', () => {
     const room = getRoomOfSocket(socket);
     if (!room || room.phase !== PHASES.LOBBY) return;

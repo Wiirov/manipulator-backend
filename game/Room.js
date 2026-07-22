@@ -119,9 +119,9 @@ export class Room {
     this.assistantId = null;
     const distribution = Room.getRoleDistribution(this.activePlayerCount);
     const rolePool = [];
-    for (let i = 0; i < distribution.innocent; i += 1) rolePool.push('innocent');
+    // Assistants are chosen by the thief during the night, not dealt at random.
+    for (let i = 0; i < distribution.innocent + distribution.assistant; i += 1) rolePool.push('innocent');
     for (let i = 0; i < distribution.thief; i += 1) rolePool.push('thief');
-    for (let i = 0; i < distribution.assistant; i += 1) rolePool.push('assistant');
 
     for (const player of this.activePlayers) {
       player.role = 'innocent';
@@ -177,6 +177,7 @@ export class Room {
   setAssistant(assistantId) {
     const assistant = this.players.get(assistantId);
     if (!assistant || assistant.isSpectator || assistant.id === this.thiefId) return false;
+    if (assistant.role !== 'innocent') return false;
     this.assistantId = assistantId;
     assistant.role = 'assistant';
     this.actionLog.push({ type: 'assistant_selected', assistantId, at: Date.now() });
@@ -282,10 +283,16 @@ export class Room {
     const self = this.players.get(forId);
     const isSpectator = self?.isSpectator;
     const revealRoles = this.phase === PHASES.RESULTS || isSpectator;
-    const thieves = this.activePlayers.filter((p) => p.role === 'thief');
-    const assistants = this.activePlayers.filter((p) => p.role === 'assistant');
-    const assistantInfo = Object.fromEntries(assistants.map((p) => [p.id, thieves.map((thief) => thief.name)]));
-    const thiefInfo = Object.fromEntries(thieves.map((p) => [p.id, assistants.map((assistant) => assistant.name)]));
+    let partner = null;
+    if (self && !isSpectator) {
+      if (self.role === 'thief' && this.assistantId) {
+        const assistant = this.players.get(this.assistantId);
+        if (assistant) partner = { role: 'assistant', name: assistant.name };
+      } else if (self.role === 'assistant' && this.thiefId) {
+        const thief = this.players.get(this.thiefId);
+        if (thief) partner = { role: 'thief', name: thief.name };
+      }
+    }
 
     return {
       code: this.code,
@@ -295,8 +302,7 @@ export class Room {
       activePlayerCount: this.activePlayerCount,
       settings: this.settings,
       roleSummary: this.getRoleSummary(),
-      assistantInfo,
-      thiefInfo,
+      partner,
       jewelStolen: this.phase === PHASES.DAY || this.phase === PHASES.VOTING || this.phase === PHASES.RESULTS
         ? this.jewelStolen
         : false,

@@ -36,7 +36,13 @@ export function startRollingPhase(io, room) {
     }
   }
   for (const player of room.playerList) {
-    if (player.socketId) {
+    if (!player.socketId) continue;
+    if (player.role === 'thief') {
+      io.to(player.socketId).emit('thief_role_intro', {
+        title: 'You are the Thief',
+        message: 'The city never learns your name. Choose your moment — and your accomplice — wisely.',
+      });
+    } else {
       io.to(player.socketId).emit('game_start_intro', {
         title: 'The Match Begins',
         message: 'The city sleeps and the jewel waits.',
@@ -83,7 +89,9 @@ function advanceNightHour(io, room) {
       coAwakePlayers,
       revealedThief: revealedThief && !isThief ? { id: revealedThief.id, name: revealedThief.name } : null,
       candidates: isThief
-        ? room.activePlayers.filter((p) => p.id !== room.thiefId).map((p) => ({ id: p.id, name: p.name }))
+        ? room.activePlayers
+            .filter((p) => p.id !== room.thiefId && p.role === 'innocent')
+            .map((p) => ({ id: p.id, name: p.name }))
         : undefined,
     });
   }
@@ -101,25 +109,32 @@ export function handleThiefAction(io, room, thiefPlayerId, assistantId) {
   const currentHourPlayers = room.playersAtHour(room.currentHour).map((p) => p.id);
   if (!currentHourPlayers.includes(thiefPlayerId)) return;
 
+  if (room.jewelStolen) return;
+
+  if (!assistantId) return;
+  if (!room.setAssistant(assistantId)) return;
+
   room.stealJewel(room.currentHour);
-  if (assistantId) {
-    room.setAssistant(assistantId);
-  }
 
   const thiefPlayer = room.players.get(thiefPlayerId);
   io.to(thiefPlayer.socketId).emit('theft_confirmed', {
     assistantId: room.assistantId,
   });
 
-  if (room.assistantId) {
-    const assistantPlayer = room.players.get(room.assistantId);
-    if (assistantPlayer?.socketId) {
-      io.to(assistantPlayer.socketId).emit('assistant_selected_intro', {
-        title: 'You were chosen',
-        message: `${thiefPlayer.name} chose you as their assistant.`,
-      });
-    }
+  const assistantPlayer = room.players.get(room.assistantId);
+  if (assistantPlayer?.socketId) {
+    io.to(assistantPlayer.socketId).emit('assistant_selected_intro', {
+      title: 'You were chosen',
+      message: `${thiefPlayer.name} chose you as their assistant.`,
+    });
+    io.to(assistantPlayer.socketId).emit('role_assigned', {
+      playerId: assistantPlayer.id,
+      role: 'assistant',
+      isThief: false,
+    });
   }
+
+  broadcastRoom(io, room);
 }
 
 function endNightPhase(io, room) {
