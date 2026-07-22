@@ -60,6 +60,7 @@ export function registerSocketHandlers(io, socket) {
     const sessionId = createSessionId();
     sessions.set(sessionId, { id: sessionId, roomCode: code, playerId, socketId: socket.id, name: name.trim(), isSpectator: Boolean(isSpectator) });
     cb?.({ ok: true, code, sessionId, playerId });
+    io.to(room.code).emit('lobby_join', { playerId, name: name.trim(), isSpectator: Boolean(isSpectator) });
     broadcastRoom(io, room);
   });
 
@@ -109,6 +110,7 @@ export function registerSocketHandlers(io, socket) {
     if (room.hostId !== socket.data.playerId) return cb?.({ error: 'Only the host can change settings' });
     room.updateSettings(settings);
     cb?.({ ok: true, settings: room.settings });
+    io.to(room.code).emit('settings_changed', { settings: room.settings });
     broadcastRoom(io, room);
   });
 
@@ -118,6 +120,7 @@ export function registerSocketHandlers(io, socket) {
     const player = room.players.get(socket.data.playerId);
     if (!player || player.isSpectator) return;
     player.ready = !player.ready;
+    io.to(room.code).emit('ready_toggled', { playerId: player.id, ready: player.ready });
     broadcastRoom(io, room);
   });
 

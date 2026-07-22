@@ -12,11 +12,20 @@ function broadcastRoom(io, room) {
   }
 }
 
+function emitToAll(io, room, eventName, payload) {
+  for (const player of room.playerList) {
+    if (player.socketId) {
+      io.to(player.socketId).emit(eventName, payload);
+    }
+  }
+}
+
 export function startRollingPhase(io, room) {
   room.phase = PHASES.ROLLING;
   room.assignRoles();
   room.tieBreaker = null;
   broadcastRoom(io, room);
+  emitToAll(io, room, 'game_started', {});
   for (const player of room.playerList) {
     if (player.socketId) {
       io.to(player.socketId).emit('role_assigned', {
@@ -58,7 +67,7 @@ function advanceNightHour(io, room) {
 
   const awakePlayers = room.playersAtHour(room.currentHour);
   room.phaseDeadline = Date.now() + room.settings.nightHourDurationMs;
-
+  emitToAll(io, room, 'night_hour', { hour: room.currentHour });
   broadcastRoom(io, room);
 
   for (const player of awakePlayers) {
@@ -117,6 +126,7 @@ function endNightPhase(io, room) {
   room.resetTimers();
   room.phase = PHASES.DAY;
   room.phaseDeadline = Date.now() + room.settings.discussionDurationMs;
+  emitToAll(io, room, 'discussion_started', {});
   broadcastRoom(io, room);
 
   room.nightTimer = setTimeout(() => {
@@ -160,6 +170,7 @@ function finishVoting(io, room) {
 
   room.phase = PHASES.RESULTS;
   room.phaseDeadline = null;
+  emitToAll(io, room, 'vote_results', { winner: result.winner });
   for (const player of room.playerList) {
     if (player.socketId) {
       io.to(player.socketId).emit('game_result', {

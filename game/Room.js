@@ -87,11 +87,7 @@ export class Room {
   }
 
   canStart() {
-    return (
-      this.phase === PHASES.LOBBY &&
-      this.activePlayerCount >= MIN_PLAYERS &&
-      this.activePlayers.every((p) => p.ready)
-    );
+    return this.phase === PHASES.LOBBY && this.activePlayerCount >= MIN_PLAYERS;
   }
 
   static getRoleDistribution(playerCount) {
@@ -286,6 +282,11 @@ export class Room {
     const self = this.players.get(forId);
     const isSpectator = self?.isSpectator;
     const revealRoles = this.phase === PHASES.RESULTS || isSpectator;
+    const thieves = this.activePlayers.filter((p) => p.role === 'thief');
+    const assistants = this.activePlayers.filter((p) => p.role === 'assistant');
+    const assistantInfo = Object.fromEntries(assistants.map((p) => [p.id, thieves.map((thief) => thief.name)]));
+    const thiefInfo = Object.fromEntries(thieves.map((p) => [p.id, assistants.map((assistant) => assistant.name)]));
+
     return {
       code: this.code,
       hostId: this.hostId,
@@ -294,24 +295,36 @@ export class Room {
       activePlayerCount: this.activePlayerCount,
       settings: this.settings,
       roleSummary: this.getRoleSummary(),
+      assistantInfo,
+      thiefInfo,
       jewelStolen: this.phase === PHASES.DAY || this.phase === PHASES.VOTING || this.phase === PHASES.RESULTS
         ? this.jewelStolen
         : false,
       currentHour: this.currentHour,
       phaseDeadline: this.phaseDeadline,
       tieBreaker: this.tieBreaker,
-      players: this.playerList.map((p) => ({
-        id: p.id,
-        name: p.name,
-        ready: p.ready,
-        connected: p.connected,
-        alive: p.alive,
-        isSpectator: p.isSpectator,
-        hour: this.phase === PHASES.LOBBY || this.phase === PHASES.ROLLING
-          ? (p.id === forId || isSpectator ? p.hour : (p.hasRolled ? true : null))
-          : (isSpectator || this.phase === PHASES.RESULTS ? p.hour : (this.phase === PHASES.DAY ? null : p.hour)),
-        role: revealRoles || p.id === forId ? p.role : undefined,
-      })),
+      players: this.playerList.map((p) => {
+        const ownHour = p.id === forId;
+        const showHour = isSpectator || this.phase === PHASES.RESULTS || ownHour;
+        let hour = null;
+        if (this.phase === PHASES.LOBBY || this.phase === PHASES.ROLLING) {
+          hour = p.id === forId || isSpectator ? p.hour : (p.hasRolled ? true : null);
+        } else if (this.phase === PHASES.DAY) {
+          hour = showHour ? p.hour : null;
+        } else {
+          hour = p.hour;
+        }
+        return {
+          id: p.id,
+          name: p.name,
+          ready: p.ready,
+          connected: p.connected,
+          alive: p.alive,
+          isSpectator: p.isSpectator,
+          hour,
+          role: revealRoles || p.id === forId ? p.role : undefined,
+        };
+      }),
       voteSummary: this.phase === PHASES.VOTING || this.phase === PHASES.RESULTS ? this.getVoteSummary() : undefined,
     };
   }
