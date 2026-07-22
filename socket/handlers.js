@@ -4,16 +4,13 @@ import {
   startRollingPhase,
   maybeStartNight,
   handleThiefAction,
-  startVotingPhase,
   maybeFinishVotingEarly,
   resetRoomToLobby,
   broadcastRoom,
 } from '../game/gameLogic.js';
 
 const nanoid = customAlphabet('ABCDEFGHJKLMNPQRSTUVWXYZ23456789', 5);
-
-// In-memory room store. Fine for a single-process game server;
-// swap for Redis if you ever need horizontal scaling.
+const sessions = new Map();
 const rooms = new Map();
 
 function generateRoomCode() {
@@ -24,56 +21,113 @@ function generateRoomCode() {
   return code;
 }
 
-function getRoomOfSocket(socketId) {
-  for (const room of rooms.values()) {
-    if (room.players.has(socketId)) return room;
+function createPlayerId() {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function createSessionId() {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function getRoomOfSocket(socket) {
+  const playerId = socket.data.playerId;
+  if (playerId) {
+    for (const room of rooms.values()) {
+      if (room.players.has(playerId)) return room;
+    }
   }
   return null;
 }
 
+function getPlayerForSocket(socket) {
+  const room = getRoomOfSocket(socket);
+  if (!room) return null;
+  return room.players.get(socket.data.playerId);
+}
+
 export function registerSocketHandlers(io, socket) {
-  socket.on('create_room', ({ name }, cb) => {
+  socket.on('create_room', ({ name, isSpectator }, cb) => {
     if (!name || !name.trim()) return cb?.({ error: 'Name required' });
     const code = generateRoomCode();
-    const room = new Room(code, socket.id);
-    room.addPlayer(socket.id, name.trim());
+    const room = new Room(code, null);
+    const playerId = createPlayerId();
+    room.addPlayer(playerId, name.trim(), { socketId: socket.id, isSpectator: Boolean(isSpectator) });
+    room.hostId = playerId;
     rooms.set(code, room);
     socket.join(code);
     socket.data.roomCode = code;
-    cb?.({ ok: true, code });
+    socket.data.playerId = playerId;
+    const sessionId = createSessionId();
+    sessions.set(sessionId, { id: sessionId, roomCode: code, playerId, socketId: socket.id, name: name.trim(), isSpectator: Boolean(isSpectator) });
+    cb?.({ ok: true, code, sessionId, playerId });
     broadcastRoom(io, room);
   });
 
-  socket.on('join_room', ({ code, name }, cb) => {
+  socket.on('join_room', ({ code, name, isSpectator }, cb) => {
     const room = rooms.get((code || '').toUpperCase());
     if (!room) return cb?.({ error: 'Room not found' });
     if (room.phase !== PHASES.LOBBY) return cb?.({ error: 'Game already in progress' });
-    if (room.playerCount >= 12) return cb?.({ error: 'Room is full' });
     if (!name || !name.trim()) return cb?.({ error: 'Name required' });
 
-    room.addPlayer(socket.id, name.trim());
+    const playerId = createPlayerId();
+    room.addPlayer(playerId, name.trim(), { socketId: socket.id, isSpectator: Boolean(isSpectator) });
     socket.join(room.code);
     socket.data.roomCode = room.code;
-    cb?.({ ok: true, code: room.code });
+    socket.data.playerId = playerId;
+    const sessionId = createSessionId();
+    sessions.set(sessionId, { id: sessionId, roomCode: room.code, playerId, socketId: socket.id, name: name.trim(), isSpectator: Boolean(isSpectator) });
+    cb?.({ ok: true, code: room.code, sessionId, playerId });
+    broadcastRoom(io, room);
+  });
+
+  socket.on('restore_session', ({ sessionId, roomId, playerId }, cb) => {
+    const session = sessions.get(sessionId);
+    const room = rooms.get((roomId || '').toUpperCase());
+    if (!session || !room || session.roomCode !== room.code || session.playerId !== playerId) {
+      return cb?.({ error: 'Session expired' });
+    }
+
+    const existingPlayer = room.players.get(playerId);
+    if (existingPlayer) {
+      existingPlayer.socketId = socket.id;
+      existingPlayer.connected = true;
+    } else {
+      room.addPlayer(playerId, session.name, { socketId: socket.id, isSpectator: Boolean(session.isSpectator) });
+    }
+
+    socket.join(room.code);
+    socket.data.roomCode = room.code;
+    socket.data.playerId = playerId;
+    session.socketId = socket.id;
+    cb?.({ ok: true, code: room.code, sessionId, playerId });
+    broadcastRoom(io, room);
+  });
+
+  socket.on('update_room_settings', ({ settings }, cb) => {
+    const room = getRoomOfSocket(socket);
+    if (!room) return cb?.({ error: 'Room not found' });
+    if (room.hostId !== socket.data.playerId) return cb?.({ error: 'Only the host can change settings' });
+    room.updateSettings(settings);
+    cb?.({ ok: true, settings: room.settings });
     broadcastRoom(io, room);
   });
 
   socket.on('toggle_ready', () => {
-    const room = getRoomOfSocket(socket.id);
+    const room = getRoomOfSocket(socket);
     if (!room || room.phase !== PHASES.LOBBY) return;
-    const player = room.players.get(socket.id);
-    if (!player) return;
+    const player = room.players.get(socket.data.playerId);
+    if (!player || player.isSpectator) return;
     player.ready = !player.ready;
     broadcastRoom(io, room);
   });
 
   socket.on('start_game', () => {
-    const room = getRoomOfSocket(socket.id);
+    const room = getRoomOfSocket(socket);
     if (!room) return;
-    if (room.hostId !== socket.id) return;
+    if (room.hostId !== socket.data.playerId) return;
     if (!room.canStart()) {
       socket.emit('error_message', {
-        message: `Need at least ${CONFIG.MIN_PLAYERS} players, all ready.`,
+        message: `Need at least ${CONFIG.MIN_PLAYERS} active players, all ready.`,
       });
       return;
     }
@@ -81,9 +135,9 @@ export function registerSocketHandlers(io, socket) {
   });
 
   socket.on('roll_dice', () => {
-    const room = getRoomOfSocket(socket.id);
+    const room = getRoomOfSocket(socket);
     if (!room || room.phase !== PHASES.ROLLING) return;
-    const hour = room.rollDiceFor(socket.id);
+    const hour = room.rollDiceFor(socket.data.playerId);
     if (hour === null) return;
     socket.emit('dice_result', { hour });
     broadcastRoom(io, room);
@@ -91,50 +145,43 @@ export function registerSocketHandlers(io, socket) {
   });
 
   socket.on('thief_steal', ({ assistantId }) => {
-    const room = getRoomOfSocket(socket.id);
+    const room = getRoomOfSocket(socket);
     if (!room) return;
-    handleThiefAction(io, room, socket.id, assistantId || null);
+    handleThiefAction(io, room, socket.data.playerId, assistantId || null);
   });
 
   socket.on('chat_message', ({ text }) => {
-    const room = getRoomOfSocket(socket.id);
+    const room = getRoomOfSocket(socket);
     if (!room || room.phase !== PHASES.DAY) return;
     if (!text || !text.trim()) return;
-    const msg = room.addChatMessage(socket.id, text.trim());
+    const msg = room.addChatMessage(socket.data.playerId, text.trim());
     if (msg) io.to(room.code).emit('chat_message', msg);
   });
 
   socket.on('cast_vote', ({ targetId }) => {
-    const room = getRoomOfSocket(socket.id);
+    const room = getRoomOfSocket(socket);
     if (!room || room.phase !== PHASES.VOTING) return;
-    const ok = room.castVote(socket.id, targetId);
+    const ok = room.castVote(socket.data.playerId, targetId);
     if (!ok) return;
-    io.to(room.code).emit('vote_cast', { voterId: socket.id, voteCount: room.votes.size, total: room.playerCount });
+    io.to(room.code).emit('vote_cast', { voterId: socket.data.playerId, voteCount: room.votes.size, total: room.activePlayerCount });
     maybeFinishVotingEarly(io, room);
   });
 
   socket.on('play_again', () => {
-    const room = getRoomOfSocket(socket.id);
-    if (!room || room.hostId !== socket.id) return;
+    const room = getRoomOfSocket(socket);
+    if (!room || room.hostId !== socket.data.playerId) return;
     resetRoomToLobby(io, room);
   });
 
   socket.on('disconnect', () => {
-    const room = getRoomOfSocket(socket.id);
-    if (!room) return;
+    const playerId = socket.data.playerId;
+    const room = getRoomOfSocket(socket);
+    if (!room || !playerId) return;
 
-    if (room.phase === PHASES.LOBBY) {
-      room.removePlayer(socket.id);
-      if (room.playerCount === 0) {
-        rooms.delete(room.code);
-        return;
-      }
-    } else {
-      // Mid-game: keep their seat (role/hour intact) but mark disconnected
-      // so votes/deduction still make sense; they can rejoin logic could be
-      // added later via a reconnect token.
-      const p = room.players.get(socket.id);
-      if (p) p.connected = false;
+    const player = room.players.get(playerId);
+    if (player) {
+      player.connected = false;
+      player.socketId = null;
     }
     broadcastRoom(io, room);
   });

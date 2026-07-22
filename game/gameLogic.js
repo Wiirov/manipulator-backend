@@ -6,14 +6,34 @@ import { PHASES, CONFIG } from './Room.js';
 
 function broadcastRoom(io, room) {
   for (const player of room.playerList) {
-    io.to(player.id).emit('room_update', room.publicState(player.id));
+    if (player.socketId) {
+      io.to(player.socketId).emit('room_update', room.publicState(player.id));
+    }
   }
 }
 
 export function startRollingPhase(io, room) {
   room.phase = PHASES.ROLLING;
-  room.assignThief();
+  room.assignRoles();
+  room.tieBreaker = null;
   broadcastRoom(io, room);
+  for (const player of room.playerList) {
+    if (player.socketId) {
+      io.to(player.socketId).emit('role_assigned', {
+        playerId: player.id,
+        role: player.role,
+        isThief: player.role === 'thief',
+      });
+    }
+  }
+  for (const player of room.playerList) {
+    if (player.socketId) {
+      io.to(player.socketId).emit('game_start_intro', {
+        title: 'The Match Begins',
+        message: 'The city sleeps and the jewel waits.',
+      });
+    }
+  }
 }
 
 // Called whenever a roll comes in; once everyone has rolled, kick off the night.
@@ -23,6 +43,7 @@ export function maybeStartNight(io, room) {
   room.currentHour = 0;
   room.jewelStolen = false;
   room.stolenAtHour = null;
+  room.phaseDeadline = Date.now() + room.settings.nightHourDurationMs;
   broadcastRoom(io, room);
   advanceNightHour(io, room);
 }
@@ -30,27 +51,30 @@ export function maybeStartNight(io, room) {
 function advanceNightHour(io, room) {
   room.currentHour += 1;
 
-  if (room.currentHour > 6) {
+  if (room.currentHour > room.settings.maxHours) {
     endNightPhase(io, room);
     return;
   }
 
   const awakePlayers = room.playersAtHour(room.currentHour);
-  room.phaseDeadline = Date.now() + CONFIG.NIGHT_HOUR_DURATION_MS;
+  room.phaseDeadline = Date.now() + room.settings.nightHourDurationMs;
 
-  // Public tick so everyone's UI shows "Hour N" and the sleeping animation
   broadcastRoom(io, room);
 
-  // Private payload only to players awake this hour
   for (const player of awakePlayers) {
     const isThief = player.id === room.thiefId;
-    io.to(player.id).emit('night_wake', {
+    const coAwakePlayers = awakePlayers
+      .filter((candidate) => candidate.id !== player.id)
+      .map((candidate) => ({ id: candidate.id, name: candidate.name }));
+    const revealedThief = awakePlayers.find((candidate) => candidate.role === 'thief');
+    io.to(player.socketId).emit('night_wake', {
       hour: room.currentHour,
       isThief,
       jewelPresent: !room.jewelStolen,
-      // thief gets the roster (minus self) to pick an assistant from
+      coAwakePlayers,
+      revealedThief: revealedThief && !isThief ? { id: revealedThief.id, name: revealedThief.name } : null,
       candidates: isThief
-        ? room.playerList.filter((p) => p.id !== room.thiefId).map((p) => ({ id: p.id, name: p.name }))
+        ? room.activePlayers.filter((p) => p.id !== room.thiefId).map((p) => ({ id: p.id, name: p.name }))
         : undefined,
     });
   }
@@ -58,47 +82,59 @@ function advanceNightHour(io, room) {
   room.resetTimers();
   room.nightTimer = setTimeout(() => {
     advanceNightHour(io, room);
-  }, CONFIG.NIGHT_HOUR_DURATION_MS);
+  }, room.settings.nightHourDurationMs);
 }
 
 // Thief calls this (via socket handler) during their awake window.
-export function handleThiefAction(io, room, thiefSocketId, assistantId) {
+export function handleThiefAction(io, room, thiefPlayerId, assistantId) {
   if (room.phase !== PHASES.NIGHT) return;
-  if (thiefSocketId !== room.thiefId) return;
+  if (thiefPlayerId !== room.thiefId) return;
   const currentHourPlayers = room.playersAtHour(room.currentHour).map((p) => p.id);
-  if (!currentHourPlayers.includes(thiefSocketId)) return; // not their hour
+  if (!currentHourPlayers.includes(thiefPlayerId)) return;
 
   room.stealJewel(room.currentHour);
   if (assistantId) {
     room.setAssistant(assistantId);
   }
 
-  io.to(thiefSocketId).emit('theft_confirmed', {
+  const thiefPlayer = room.players.get(thiefPlayerId);
+  io.to(thiefPlayer.socketId).emit('theft_confirmed', {
     assistantId: room.assistantId,
   });
+
+  if (room.assistantId) {
+    const assistantPlayer = room.players.get(room.assistantId);
+    if (assistantPlayer?.socketId) {
+      io.to(assistantPlayer.socketId).emit('assistant_selected_intro', {
+        title: 'You were chosen',
+        message: `${thiefPlayer.name} chose you as their assistant.`,
+      });
+    }
+  }
 }
 
 function endNightPhase(io, room) {
   room.resetTimers();
   room.phase = PHASES.DAY;
-  room.phaseDeadline = Date.now() + CONFIG.DAY_DISCUSSION_MS;
+  room.phaseDeadline = Date.now() + room.settings.discussionDurationMs;
   broadcastRoom(io, room);
 
   room.nightTimer = setTimeout(() => {
     startVotingPhase(io, room);
-  }, CONFIG.DAY_DISCUSSION_MS);
+  }, room.settings.discussionDurationMs);
 }
 
 export function startVotingPhase(io, room) {
   room.resetTimers();
   room.phase = PHASES.VOTING;
   room.votes.clear();
-  room.phaseDeadline = Date.now() + CONFIG.VOTING_DURATION_MS;
+  room.tieBreaker = null;
+  room.phaseDeadline = Date.now() + room.settings.votingDurationMs;
   broadcastRoom(io, room);
 
   room.nightTimer = setTimeout(() => {
     finishVoting(io, room);
-  }, CONFIG.VOTING_DURATION_MS);
+  }, room.settings.votingDurationMs);
 }
 
 export function maybeFinishVotingEarly(io, room) {
@@ -110,17 +146,30 @@ export function maybeFinishVotingEarly(io, room) {
 
 function finishVoting(io, room) {
   room.resetTimers();
-  room.phase = PHASES.RESULTS;
   const result = room.tallyVotes();
+  if (result.tie && result.tieBreakerCandidates.length) {
+    room.phase = PHASES.VOTING;
+    room.startTieBreaker();
+    room.phaseDeadline = Date.now() + room.settings.tieBreakerDurationMs;
+    broadcastRoom(io, room);
+    room.nightTimer = setTimeout(() => {
+      finishVoting(io, room);
+    }, room.settings.tieBreakerDurationMs);
+    return;
+  }
 
+  room.phase = PHASES.RESULTS;
+  room.phaseDeadline = null;
   for (const player of room.playerList) {
-    io.to(player.id).emit('game_result', {
-      ...result,
-      thiefId: room.thiefId,
-      assistantId: room.assistantId,
-      stolenAtHour: room.stolenAtHour,
-      players: room.playerList.map((p) => ({ id: p.id, name: p.name, role: p.role, hour: p.hour })),
-    });
+    if (player.socketId) {
+      io.to(player.socketId).emit('game_result', {
+        ...result,
+        thiefId: room.thiefId,
+        assistantId: room.assistantId,
+        stolenAtHour: room.stolenAtHour,
+        players: room.playerList.map((p) => ({ id: p.id, name: p.name, role: p.role, hour: p.hour, isSpectator: p.isSpectator })),
+      });
+    }
   }
   broadcastRoom(io, room);
 }
@@ -135,10 +184,11 @@ export function resetRoomToLobby(io, room) {
   room.currentHour = 0;
   room.chatMessages = [];
   room.votes.clear();
+  room.tieBreaker = null;
   for (const p of room.playerList) {
     p.ready = false;
     p.hour = null;
-    p.role = 'innocent';
+    p.role = p.isSpectator ? 'spectator' : 'innocent';
     p.hasRolled = false;
   }
   broadcastRoom(io, room);

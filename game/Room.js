@@ -10,47 +10,61 @@ export const PHASES = {
   RESULTS: 'results',
 };
 
-const NIGHT_HOUR_DURATION_MS = 9000; // how long each "hour" stays revealed
-const DAY_DISCUSSION_MS = 180000; // 3 minutes discussion
+const NIGHT_HOUR_DURATION_MS = 9000;
+const DAY_DISCUSSION_MS = 180000;
 const VOTING_DURATION_MS = 45000;
+const TIE_BREAKER_DURATION_MS = 15000;
 const MIN_PLAYERS = 5;
 
 export class Room {
-  constructor(code, hostSocketId) {
+  constructor(code, hostPlayerId) {
     this.code = code;
-    this.hostId = hostSocketId;
+    this.hostId = hostPlayerId;
     this.phase = PHASES.LOBBY;
-    this.players = new Map(); // socketId -> playerObject
+    this.players = new Map();
     this.jewelStolen = false;
     this.stolenAtHour = null;
     this.thiefId = null;
     this.assistantId = null;
     this.currentHour = 0;
     this.chatMessages = [];
-    this.votes = new Map(); // voterId -> targetId
+    this.votes = new Map();
     this.nightTimer = null;
-    this.phaseDeadline = null; // epoch ms, used by clients for countdown UI
+    this.phaseDeadline = null;
     this.createdAt = Date.now();
+    this.settings = {
+      nightHourDurationMs: NIGHT_HOUR_DURATION_MS,
+      discussionDurationMs: DAY_DISCUSSION_MS,
+      votingDurationMs: VOTING_DURATION_MS,
+      tieBreakerDurationMs: TIE_BREAKER_DURATION_MS,
+      maxHours: 6,
+    };
+    this.tieBreaker = null;
+    this.actionLog = [];
   }
 
-  addPlayer(socketId, name) {
-    this.players.set(socketId, {
-      id: socketId,
-      name: name.slice(0, 20),
+  addPlayer(playerId, name, options = {}) {
+    const player = {
+      id: playerId,
+      socketId: options.socketId || null,
+      name: String(name).slice(0, 20),
       ready: false,
       connected: true,
       hour: null,
-      role: 'innocent', // 'thief' | 'assistant' | 'innocent'
+      role: options.isSpectator ? 'spectator' : 'innocent',
       alive: true,
       hasRolled: false,
       hasActedThisHour: false,
-    });
+      isSpectator: Boolean(options.isSpectator),
+    };
+    this.players.set(playerId, player);
+    return player;
   }
 
-  removePlayer(socketId) {
-    this.players.delete(socketId);
-    this.votes.delete(socketId);
-    if (this.hostId === socketId) {
+  removePlayer(playerId) {
+    this.players.delete(playerId);
+    this.votes.delete(playerId);
+    if (this.hostId === playerId) {
       const next = this.players.keys().next();
       this.hostId = next.done ? null : next.value;
     }
@@ -64,59 +78,127 @@ export class Room {
     return this.players.size;
   }
 
+  get activePlayers() {
+    return this.playerList.filter((p) => !p.isSpectator);
+  }
+
+  get activePlayerCount() {
+    return this.activePlayers.length;
+  }
+
   canStart() {
     return (
       this.phase === PHASES.LOBBY &&
-      this.playerCount >= MIN_PLAYERS &&
-      this.playerList.every((p) => p.ready)
+      this.activePlayerCount >= MIN_PLAYERS &&
+      this.activePlayers.every((p) => p.ready)
     );
   }
 
-  // Assign a random thief among current players
-  assignThief() {
-    const ids = this.playerList.map((p) => p.id);
-    const thiefId = ids[Math.floor(Math.random() * ids.length)];
-    this.thiefId = thiefId;
-    this.players.get(thiefId).role = 'thief';
+  static getRoleDistribution(playerCount) {
+    const table = {
+      5: { innocent: 3, thief: 1, assistant: 1 },
+      6: { innocent: 4, thief: 1, assistant: 1 },
+      7: { innocent: 4, thief: 1, assistant: 2 },
+      8: { innocent: 5, thief: 2, assistant: 1 },
+      9: { innocent: 5, thief: 2, assistant: 2 },
+      10: { innocent: 6, thief: 2, assistant: 2 },
+      11: { innocent: 6, thief: 2, assistant: 3 },
+      12: { innocent: 7, thief: 2, assistant: 3 },
+      13: { innocent: 7, thief: 3, assistant: 3 },
+      14: { innocent: 8, thief: 3, assistant: 3 },
+      15: { innocent: 8, thief: 3, assistant: 4 },
+    };
+    return table[playerCount] || { innocent: Math.max(0, playerCount - 2), thief: 1, assistant: 0 };
   }
 
-  rollDiceFor(socketId) {
-    const player = this.players.get(socketId);
-    if (!player || player.hasRolled) return null;
-    const hour = 1 + Math.floor(Math.random() * 6);
+  getRoleSummary() {
+    return {
+      thiefCount: Room.getRoleDistribution(this.activePlayerCount).thief,
+      assistantCount: Room.getRoleDistribution(this.activePlayerCount).assistant,
+    };
+  }
+
+  assignRoles() {
+    this.thiefId = null;
+    this.assistantId = null;
+    const distribution = Room.getRoleDistribution(this.activePlayerCount);
+    const rolePool = [];
+    for (let i = 0; i < distribution.innocent; i += 1) rolePool.push('innocent');
+    for (let i = 0; i < distribution.thief; i += 1) rolePool.push('thief');
+    for (let i = 0; i < distribution.assistant; i += 1) rolePool.push('assistant');
+
+    for (const player of this.activePlayers) {
+      player.role = 'innocent';
+      player.hour = null;
+      player.hasRolled = false;
+      player.hasActedThisHour = false;
+    }
+
+    for (const player of this.playerList.filter((p) => p.isSpectator)) {
+      player.role = 'spectator';
+    }
+
+    const shuffled = [...rolePool];
+    for (let i = shuffled.length - 1; i > 0; i -= 1) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
+
+    const activePlayers = this.activePlayers;
+    activePlayers.forEach((player, index) => {
+      const role = shuffled[index] || 'innocent';
+      player.role = role;
+      if (role === 'thief') this.thiefId = player.id;
+    });
+
+    this.actionLog = [];
+    this.actionLog.push({ type: 'roles_assigned', at: Date.now() });
+    return this.thiefId;
+  }
+
+  assignThief() {
+    return this.assignRoles();
+  }
+
+  rollDiceFor(playerId) {
+    const player = this.players.get(playerId);
+    if (!player || player.hasRolled || player.isSpectator) return null;
+    const maxHours = Math.min(10, Math.max(6, this.activePlayerCount));
+    const hour = 1 + Math.floor(Math.random() * maxHours);
     player.hour = hour;
     player.hasRolled = true;
     return hour;
   }
 
   allPlayersRolled() {
-    return this.playerList.every((p) => p.hasRolled);
+    return this.activePlayers.every((p) => p.hasRolled);
   }
 
   playersAtHour(hour) {
-    return this.playerList.filter((p) => p.hour === hour);
+    return this.activePlayers.filter((p) => p.hour === hour);
   }
 
-  // Called when the Thief chooses their accomplice during their awake hour
   setAssistant(assistantId) {
-    if (!this.players.has(assistantId)) return false;
-    if (assistantId === this.thiefId) return false;
+    const assistant = this.players.get(assistantId);
+    if (!assistant || assistant.isSpectator || assistant.id === this.thiefId) return false;
     this.assistantId = assistantId;
-    this.players.get(assistantId).role = 'assistant';
+    assistant.role = 'assistant';
+    this.actionLog.push({ type: 'assistant_selected', assistantId, at: Date.now() });
     return true;
   }
 
   stealJewel(hour) {
     this.jewelStolen = true;
     this.stolenAtHour = hour;
+    this.actionLog.push({ type: 'jewel_stolen', at: Date.now(), hour });
   }
 
-  addChatMessage(socketId, text) {
-    const player = this.players.get(socketId);
+  addChatMessage(playerId, text) {
+    const player = this.players.get(playerId);
     if (!player) return null;
     const msg = {
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      playerId: socketId,
+      playerId,
       name: player.name,
       text: String(text).slice(0, 400),
       ts: Date.now(),
@@ -126,13 +208,26 @@ export class Room {
   }
 
   castVote(voterId, targetId) {
-    if (!this.players.has(voterId) || !this.players.has(targetId)) return false;
+    const voter = this.players.get(voterId);
+    const target = this.players.get(targetId);
+    if (!voter || !target || voter.isSpectator) return false;
+    if (this.tieBreaker?.active && !this.tieBreaker.candidates.includes(targetId)) return false;
     this.votes.set(voterId, targetId);
     return true;
   }
 
   allVoted() {
-    return this.votes.size === this.playerCount;
+    return this.votes.size === this.activePlayerCount;
+  }
+
+  startTieBreaker() {
+    const tiedIds = [...new Set(this.votes.values())];
+    this.tieBreaker = {
+      active: true,
+      candidates: tiedIds,
+      round: 1,
+    };
+    this.votes.clear();
   }
 
   tallyVotes() {
@@ -152,41 +247,72 @@ export class Room {
         tie = true;
       }
     }
-    const majorityThreshold = this.playerCount / 2;
+    const majorityThreshold = Math.floor(this.activePlayerCount / 2);
     const isMajority = !tie && topCount > majorityThreshold;
+    const targetPlayer = this.players.get(topId);
+    const targetRole = targetPlayer?.role || 'innocent';
     const innocentsWin = isMajority && topId === this.thiefId;
+    const thievesWin = isMajority && (topId !== this.thiefId);
     return {
       counts: Object.fromEntries(counts),
       accusedId: tie ? null : topId,
       innocentsWin,
+      thievesWin,
       tie,
+      winner: innocentsWin ? 'innocents' : thievesWin ? 'thieves' : 'none',
+      targetRole,
+      tieBreakerCandidates: tie ? [...new Set(counts.keys())] : [],
     };
   }
 
-  // Public-safe snapshot: strips secret role info unless `forId` is entitled to see it.
+  updateSettings(nextSettings) {
+    this.settings = {
+      ...this.settings,
+      ...nextSettings,
+      maxHours: Math.min(10, Math.max(6, Number(nextSettings.maxHours || this.settings.maxHours))),
+    };
+  }
+
+  getVoteSummary() {
+    const summary = [];
+    const counts = this.tallyVotes().counts;
+    for (const player of this.activePlayers) {
+      summary.push({ id: player.id, name: player.name, votes: counts[player.id] || 0 });
+    }
+    return summary.sort((a, b) => b.votes - a.votes);
+  }
+
   publicState(forId = null) {
-    const revealRoles = this.phase === PHASES.RESULTS;
+    const self = this.players.get(forId);
+    const isSpectator = self?.isSpectator;
+    const revealRoles = this.phase === PHASES.RESULTS || isSpectator;
     return {
       code: this.code,
       hostId: this.hostId,
       phase: this.phase,
+      selfPlayerId: forId,
+      activePlayerCount: this.activePlayerCount,
+      settings: this.settings,
+      roleSummary: this.getRoleSummary(),
       jewelStolen: this.phase === PHASES.DAY || this.phase === PHASES.VOTING || this.phase === PHASES.RESULTS
         ? this.jewelStolen
         : false,
       currentHour: this.currentHour,
       phaseDeadline: this.phaseDeadline,
+      tieBreaker: this.tieBreaker,
       players: this.playerList.map((p) => ({
         id: p.id,
         name: p.name,
         ready: p.ready,
         connected: p.connected,
         alive: p.alive,
+        isSpectator: p.isSpectator,
         hour: this.phase === PHASES.LOBBY || this.phase === PHASES.ROLLING
-          ? (p.id === forId ? p.hour : (p.hasRolled ? true : null)) // others only see "has rolled", not the number
-          : p.hour, // hours become public once night starts (needed for deduction)
+          ? (p.id === forId || isSpectator ? p.hour : (p.hasRolled ? true : null))
+          : (isSpectator || this.phase === PHASES.RESULTS ? p.hour : (this.phase === PHASES.DAY ? null : p.hour)),
         role: revealRoles || p.id === forId ? p.role : undefined,
       })),
-      voteCounts: this.phase === PHASES.RESULTS ? Object.fromEntries(this.votes.size ? this.tallyVotes().counts : []) : undefined,
+      voteSummary: this.phase === PHASES.VOTING || this.phase === PHASES.RESULTS ? this.getVoteSummary() : undefined,
     };
   }
 
@@ -203,4 +329,5 @@ export const CONFIG = {
   NIGHT_HOUR_DURATION_MS,
   DAY_DISCUSSION_MS,
   VOTING_DURATION_MS,
+  TIE_BREAKER_DURATION_MS,
 };
