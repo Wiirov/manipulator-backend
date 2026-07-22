@@ -289,20 +289,23 @@ export class Room {
     if (self && !isSpectator) {
       if (self.role === 'thief' && this.assistantId) {
         const assistant = this.players.get(this.assistantId);
-        if (assistant) partner = { role: 'assistant', name: assistant.name };
+        if (assistant) partner = { id: assistant.id, role: 'assistant', name: assistant.name };
       } else if (self.role === 'assistant' && this.thiefId) {
         const thief = this.players.get(this.thiefId);
-        if (thief) partner = { role: 'thief', name: thief.name };
+        if (thief) partner = { id: thief.id, role: 'thief', name: thief.name };
       }
     }
 
-    const showSameHour = self?.hour
-      && !isSpectator
-      && this.phase !== PHASES.LOBBY
-      && this.phase !== PHASES.ROLLING;
+    const partnerId = partner?.id || null;
+    const showSameHour = Boolean(self?.hour && !isSpectator && this.phase !== PHASES.LOBBY);
     const sameHourPlayers = showSameHour
       ? this.activePlayers
-          .filter((p) => p.id !== forId && p.hour === self.hour)
+          .filter((p) => {
+            if (p.id === forId || p.id === partnerId) return false;
+            if (p.hour !== self.hour) return false;
+            if (this.phase === PHASES.ROLLING && !p.hasRolled) return false;
+            return true;
+          })
           .map((p) => ({ id: p.id, name: p.name }))
       : [];
 
