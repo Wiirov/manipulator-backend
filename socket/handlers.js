@@ -81,29 +81,6 @@ export function registerSocketHandlers(io, socket) {
     broadcastRoom(io, room);
   });
 
-  socket.on('restore_session', ({ sessionId, roomId, playerId }, cb) => {
-    const session = sessions.get(sessionId);
-    const room = rooms.get((roomId || '').toUpperCase());
-    if (!session || !room || session.roomCode !== room.code || session.playerId !== playerId) {
-      return cb?.({ error: 'Session expired' });
-    }
-
-    const existingPlayer = room.players.get(playerId);
-    if (existingPlayer) {
-      existingPlayer.socketId = socket.id;
-      existingPlayer.connected = true;
-    } else {
-      room.addPlayer(playerId, session.name, { socketId: socket.id, isSpectator: Boolean(session.isSpectator) });
-    }
-
-    socket.join(room.code);
-    socket.data.roomCode = room.code;
-    socket.data.playerId = playerId;
-    session.socketId = socket.id;
-    cb?.({ ok: true, code: room.code, sessionId, playerId });
-    broadcastRoom(io, room);
-  });
-
   socket.on('update_room_settings', ({ settings }, cb) => {
     const room = getRoomOfSocket(socket);
     if (!room) return cb?.({ error: 'Room not found' });
