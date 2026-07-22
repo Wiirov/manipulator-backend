@@ -124,8 +124,10 @@ export function handleThiefAction(io, room, thiefPlayerId, assistantId) {
   const assistantPlayer = room.players.get(room.assistantId);
   if (assistantPlayer?.socketId) {
     io.to(assistantPlayer.socketId).emit('assistant_selected_intro', {
-      title: 'You were chosen',
-      message: `${thiefPlayer.name} chose you as their assistant.`,
+      title: 'You Are In',
+      subtitle: 'Accomplice',
+      message: `${thiefPlayer.name} chose you as their accomplice.`,
+      detail: 'You now wake with the Thief. Help them stay hidden — the table must never find out.',
     });
     io.to(assistantPlayer.socketId).emit('role_assigned', {
       playerId: assistantPlayer.id,

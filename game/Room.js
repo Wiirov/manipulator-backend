@@ -1,6 +1,8 @@
 // Room.js — pure data model + state helpers for a single game room.
 // No socket/network code lives here, only game state, so it's easy to test/reason about.
 
+import { randomInt } from 'node:crypto';
+
 export const PHASES = {
   LOBBY: 'lobby',
   ROLLING: 'rolling',
@@ -136,7 +138,7 @@ export class Room {
 
     const shuffled = [...rolePool];
     for (let i = shuffled.length - 1; i > 0; i -= 1) {
-      const j = Math.floor(Math.random() * (i + 1));
+      const j = randomInt(i + 1);
       [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
     }
 
@@ -160,7 +162,7 @@ export class Room {
     const player = this.players.get(playerId);
     if (!player || player.hasRolled || player.isSpectator) return null;
     const maxHours = Math.min(10, Math.max(6, this.activePlayerCount));
-    const hour = 1 + Math.floor(Math.random() * maxHours);
+    const hour = randomInt(1, maxHours + 1);
     player.hour = hour;
     player.hasRolled = true;
     return hour;
@@ -294,6 +296,16 @@ export class Room {
       }
     }
 
+    const showSameHour = self?.hour
+      && !isSpectator
+      && this.phase !== PHASES.LOBBY
+      && this.phase !== PHASES.ROLLING;
+    const sameHourPlayers = showSameHour
+      ? this.activePlayers
+          .filter((p) => p.id !== forId && p.hour === self.hour)
+          .map((p) => ({ id: p.id, name: p.name }))
+      : [];
+
     return {
       code: this.code,
       hostId: this.hostId,
@@ -303,6 +315,7 @@ export class Room {
       settings: this.settings,
       roleSummary: this.getRoleSummary(),
       partner,
+      sameHourPlayers,
       jewelStolen: this.phase === PHASES.DAY || this.phase === PHASES.VOTING || this.phase === PHASES.RESULTS
         ? this.jewelStolen
         : false,

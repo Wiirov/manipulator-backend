@@ -181,7 +181,26 @@ export function registerSocketHandlers(io, socket) {
   socket.on('play_again', () => {
     const room = getRoomOfSocket(socket);
     if (!room || room.hostId !== socket.data.playerId) return;
+    if (room.phase !== PHASES.RESULTS) return;
     resetRoomToLobby(io, room);
+  });
+
+  socket.on('leave_room', () => {
+    const room = getRoomOfSocket(socket);
+    const playerId = socket.data.playerId;
+    if (!room || !playerId) return;
+
+    room.removePlayer(playerId);
+    socket.leave(room.code);
+    delete socket.data.roomCode;
+    delete socket.data.playerId;
+
+    if (room.playerCount === 0) {
+      rooms.delete(room.code);
+    } else {
+      broadcastRoom(io, room);
+    }
+    socket.emit('left_room', {});
   });
 
   socket.on('disconnect', () => {
